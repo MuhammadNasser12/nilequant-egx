@@ -1,0 +1,285 @@
+import streamlit as st
+import yfinance as yf
+import pandas as pd
+import numpy as np
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+
+# 1. إعدادات الصفحة والواجهة (Front-end Setup)
+st.set_page_config(
+    page_title="مستشار البورصة المصرية | EGX Advisor",
+    page_icon="📈",
+    layout="wide"
+)
+
+# تنسيق CSS لدعم اللغة العربية (RTL) وتحسين شكل الكروت
+st.markdown("""
+    <style>
+    .main, .stApp { direction: rtl; text-align: right; }
+    div[data-testid="stMetricValue"] { font-size: 1.6rem; direction: ltr; text-align: right; }
+    .stDataFrame { direction: rtl; }
+    </style>
+""", unsafe_allow_html=True)
+
+# 2. قاعدة بيانات قطاعات وأسهم البورصة المصرية (EGX)
+EGX_SECTORS = {
+    "البنوك والخدمات المالية": {
+        "COMI.CA": "البنك التجاري الدولي (CIB)",
+        "HRHO.CA": "مجموعة إي إف جي القابضة (هيرميس)",
+        "CIEB.CA": "بنك كريدي أجريكول مصر",
+        "ADIB.CA": "مصرف أبوظبي الإسلامي",
+        "FAIT.CA": "بنك فيصل الإسلامي"
+    },
+    "العقارات والإنشاءات": {
+        "TMGH.CA": "مجموعة طلعت مصطفى القابضة",
+        "PHDC.CA": "بالم هيلز للتعمير",
+        "EMFD.CA": "إعمار مصر للتنمية",
+        "HELI.CA": "مصر الجديدة للإسكان والتعمير",
+        "MASR.CA": "مدينة مصر للإسكان والتعمير"
+    },
+    "التكنولوجيا والاتصالات والمدفوعات": {
+        "FWRY.CA": "فوري لتكنولوجيا البنوك والمدفوعات",
+        "ETEL.CA": "المصرية للاتصالات (WE)",
+        "EFIH.CA": "إي فاينانس للاستثمارات المالية والرقمية",
+        "RAYA.CA": "راية القابضة للاستثمارات المالية"
+    },
+    "البتروكيماويات والأسمدة": {
+        "ABUK.CA": "أبو قير للأسمدة",
+        "MFPC.CA": "مصر لإنتاج الأسمدة (موبكو)",
+        "SKPC.CA": "سيدي كرير للبتروكيماويات (سيدبك)",
+        "AMOC.CA": "الإسكندرية للزيوت المعدنية (أموك)"
+    },
+    "الصناعة والموارد الأساسية": {
+        "SWDY.CA": "السويدي إليكتريك",
+        "ESRS.CA": "حديد عز",
+        "EGAL.CA": "مصر للألومنيوم",
+        "ORWE.CA": "النساجون الشرقيون"
+    },
+    "الأغذية والأدوية والرعاية الصحية": {
+        "EFID.CA": "إيديتا للصناعات الغذائية",
+        "JUFO.CA": "جهينة للصناعات الغذائية",
+        "ISPH.CA": "ابن سينا فارما",
+        "PHAR.CA": "المصرية الدولية للصناعات الدوائية (إيبيكو)"
+    }
+}
+
+# 3. دوال جلب البيانات وحساب المؤشرات الفنية
+@st.cache_data(ttl=900)  # تحديث الكاش كل 15 دقيقة
+def fetch_stock_data(ticker, period="6mo"):
+    try:
+        df = yf.download(ticker, period=period, interval="1d", progress=False)
+        if df.empty:
+            return None
+        # معالجة الأعمدة متعددة المستويات في الإصدارات الحديثة من yfinance
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+        return df.dropna()
+    except Exception:
+        return None
+
+def calculate_indicators(df):
+    data = df.copy()
+    
+    # المتوسطات المتحركة (SMA 20 & SMA 50)
+    data['SMA20'] = data['Close'].rolling(window=20).mean()
+    data['SMA50'] = data['Close'].rolling(window=50).mean()
+    
+    # مؤشر القوة النسبية (RSI 14)
+    delta = data['Close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+    rs = gain / loss.replace(0, np.nan)
+    data['RSI'] = 100 - (100 / (1 + rs))
+    
+    # مؤشر الـ MACD
+    ema12 = data['Close'].ewm(span=12, adjust=False).mean()
+    ema26 = data['Close'].ewm(span=26, adjust=False).mean()
+    data['MACD'] = ema12 - ema26
+    data['Signal_Line'] = data['MACD'].ewm(span=9, adjust=False).mean()
+    
+    # متوسط المدى الحقيقي (ATR) لحساب وقف الخسارة
+    high_low = data['High'] - data['Low']
+    high_close = np.abs(data['High'] - data['Close'].shift())
+    low_close = np.abs(data['Low'] - data['Close'].shift())
+    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+    data['ATR'] = tr.rolling(window=14).mean()
+    
+    return data
+
+# 4. محرك التوصيات الذكي (Buy / Sell Decision Engine)
+def generate_recommendation(df):
+    if df is None or len(df) < 50:
+        return "بيانات غير كافية", "⚪", 0, [], 0, 0
+
+    latest = df.iloc[-1]
+    prev = df.iloc[-2]
+    
+    score = 0
+    reasons = []
+    
+    # 1. تحليل RSI
+    if latest['RSI'] < 30:
+        score += 2
+        reasons.append(f"🟢 مؤشر RSI في منطقة تشبع بيعي قوية ({latest['RSI']:.1f}) مما يدعم الارتداد الصاعد.")
+    elif latest['RSI'] < 45 and latest['RSI'] > prev['RSI']:
+        score += 1
+        reasons.append(f"🟢 مؤشر RSI يرتد لأعلى من منطقة منخفضة ({latest['RSI']:.1f}).")
+    elif latest['RSI'] > 70:
+        score -= 2
+        reasons.append(f"🔴 مؤشر RSI في منطقة تشبع شرائي ({latest['RSI']:.1f}) - احذر من جني الأرباح.")
+
+    # 2. تحليل المتوسطات المتحركة (الاتجاه)
+    if latest['Close'] > latest['SMA20'] and latest['SMA20'] > latest['SMA50']:
+        score += 2
+        reasons.append("🟢 السعر يتحرك في اتجاه صاعد واضح أعلى من متوسطي 20 و 50 يوم.")
+    elif latest['Close'] > latest['SMA20']:
+        score += 1
+        reasons.append("🟢 السعر أعلى من المتوسط المتحرك 20 يوم (إيجابي على المدى القصير).")
+    elif latest['Close'] < latest['SMA20'] and latest['SMA20'] < latest['SMA50']:
+        score -= 2
+        reasons.append("🔴 السعر في مسار هابط تحت متوسطي 20 و 50 يوم.")
+
+    # 3. تحليل MACD (الزخم)
+    if latest['MACD'] > latest['Signal_Line'] and prev['MACD'] <= prev['Signal_Line']:
+        score += 2
+        reasons.append("🟢 تقاطع إيجابي حديث (شرائي) على مؤشر MACD.")
+    elif latest['MACD'] > latest['Signal_Line']:
+        score += 1
+        reasons.append("🟢 زخم إيجابي مستمر على مؤشر MACD.")
+    elif latest['MACD'] < latest['Signal_Line'] and prev['MACD'] >= prev['Signal_Line']:
+        score -= 2
+        reasons.append("🔴 تقاطع سلبي حديث (بيعي) على مؤشر MACD.")
+    else:
+        score -= 1
+        reasons.append("🔴 زخم سلبي على مؤشر MACD.")
+
+    # تحديد القرار النهائي
+    if score >= 3:
+        decision, badge = "شراء قوي (Strong Buy)", "🟢🟢"
+    elif score >= 1:
+        decision, badge = "شراء (Buy)", "🟢"
+    elif score == 0:
+        decision, badge = "احتفاظ / مراقبة (Hold)", "🟡"
+    elif score >= -2:
+        decision, badge = "بيع / تخفيف (Sell)", "🔴"
+    else:
+        decision, badge = "بيع قوي (Strong Sell)", "🔴🔴"
+
+    # حساب مستويات وقف الخسارة وجني الأرباح باستخدام ATR
+    atr = latest['ATR'] if not np.isnan(latest['ATR']) else latest['Close'] * 0.03
+    stop_loss = latest['Close'] - (1.5 * atr)
+    take_profit = latest['Close'] + (3.0 * atr)
+
+    return decision, badge, score, reasons, stop_loss, take_profit
+
+# 5. بناء واجهة المستخدم (Dashboard UI)
+st.title("📈 مستشار الاستثمار الذكي - البورصة المصرية (EGX)")
+st.markdown("نظام متابعة القطاعات وإصدار توصيات البيع والشراء بناءً على التحليل الفني الكمي.")
+
+# الشريط الجانبي (Sidebar)
+st.sidebar.header("⚙️ لوحة التحكم والفلترة")
+selected_sector = st.sidebar.selectbox("اختر القطاع:", list(EGX_SECTORS.keys()))
+sector_stocks = EGX_SECTORS[selected_sector]
+
+selected_ticker = st.sidebar.selectbox(
+    "اختر السهم للتحليل التفصيلي:",
+    options=list(sector_stocks.keys()),
+    format_func=lambda x: f"{sector_stocks[x]} ({x.replace('.CA', '')})"
+)
+period_map = {"3 أشهر": "3mo", "6 أشهر": "6mo", "سنة كاملة": "1y", "سنتين": "2y"}
+selected_period_label = st.sidebar.select_slider("الفترة الزمنية للشارت:", options=list(period_map.keys()), value="6 أشهر")
+selected_period = period_map[selected_period_label]
+
+# --- القسم الأول: جدول مسح القطاع بالكامل (Sector Screener) ---
+st.subheader(f"📊 ملخص توصيات قطاع: {selected_sector}")
+
+sector_summary = []
+with st.spinner("جاري تحليل أسهم القطاع..."):
+    for ticker, name in sector_stocks.items():
+        raw_df = fetch_stock_data(ticker, period="6mo")
+        if raw_df is not None and len(raw_df) >= 50:
+            ind_df = calculate_indicators(raw_df)
+            decision, badge, score, _, sl, tp = generate_recommendation(ind_df)
+            last_close = ind_df['Close'].iloc[-1]
+            prev_close = ind_df['Close'].iloc[-2]
+            change_pct = ((last_close - prev_close) / prev_close) * 100
+            
+            sector_summary.append({
+                "كود السهم": ticker.replace(".CA", ""),
+                "اسم الشركة": name,
+                "السعر الحالي (ج.م)": round(last_close, 2),
+                "التغير اليومي %": f"{change_pct:+.2f}%",
+                "مؤشر RSI": round(ind_df['RSI'].iloc[-1], 1),
+                "التوصية": f"{badge} {decision}",
+                "وقف الخسارة": round(sl, 2),
+                "المستهدف": round(tp, 2)
+            })
+
+if sector_summary:
+    summary_df = pd.DataFrame(sector_summary)
+    st.dataframe(summary_df, use_container_width=True, hide_index=True)
+else:
+    st.warning("تعذر جلب بيانات القطاع حالياً، تأكد من اتصالك بالإنترنت.")
+
+st.divider()
+
+# --- القسم الثاني: التحليل التفصيلي للسهم المختار ---
+stock_name = sector_stocks[selected_ticker]
+st.subheader(f"🔍 التحليل الفني والتوصية لسهم: {stock_name} ({selected_ticker.replace('.CA', '')})")
+
+df_raw = fetch_stock_data(selected_ticker, period=selected_period)
+
+if df_raw is not None and len(df_raw) >= 50:
+    df_ind = calculate_indicators(df_raw)
+    decision, badge, score, reasons, stop_loss, take_profit = generate_recommendation(df_ind)
+    
+    latest = df_ind.iloc[-1]
+    prev = df_ind.iloc[-2]
+    price_change = latest['Close'] - prev['Close']
+    pct_change = (price_change / prev['Close']) * 100
+
+    # كروت المؤشرات السريعة (Metrics)
+    col1, col2, col3, col4, col5 = st.columns(5)
+    col1.metric("السعر الحالي (EGP)", f"{latest['Close']:.2f}", f"{pct_change:+.2f}%")
+    col2.metric("القرار الاستثماري", f"{badge} {decision.split('(')[0]}")
+    col3.metric("مؤشر القوة النسبية (RSI)", f"{latest['RSI']:.1f}")
+    col4.metric("وقف الخسارة المقترح", f"{stop_loss:.2f} ج.م")
+    col5.metric("المستهدف السعري", f"{take_profit:.2f} ج.م")
+
+    # عرض أسباب التوصية
+    with st.expander("📋 تفاصيل وأسباب التوصية الفنية (لماذا هذا القرار؟)", expanded=True):
+        for r in reasons:
+            st.write(r)
+
+    # رسم الشارت التفاعلي (Candlestick + SMA + RSI)
+    fig = make_subplots(
+        rows=2, cols=1, shared_xaxes=True,
+        vertical_spacing=0.06,
+        subplot_titles=("حركة السعر والمتوسطات المتحركة (SMA 20 & 50)", "مؤشر القوة النسبية (RSI)"),
+        row_heights=[0.7, 0.3]
+    )
+
+    # 1. الشموع اليابانية
+    fig.add_trace(go.Candlestick(
+        x=df_ind.index, open=df_ind['Open'], high=df_ind['High'],
+        low=df_ind['Low'], close=df_ind['Close'], name="السعر"
+    ), row=1, col=1)
+
+    # 2. المتوسطات المتحركة
+    fig.add_trace(go.Scatter(x=df_ind.index, y=df_ind['SMA20'], line=dict(color='orange', width=1.5), name='متوسط 20 يوم'), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df_ind.index, y=df_ind['SMA50'], line=dict(color='cyan', width=1.5), name='متوسط 50 يوم'), row=1, col=1)
+
+    # 3. مؤشر RSI
+    fig.add_trace(go.Scatter(x=df_ind.index, y=df_ind['RSI'], line=dict(color='#ab63fa', width=2), name='RSI'), row=2, col=1)
+    fig.add_hline(y=70, line_dash="dash", line_color="red", row=2, col=1)
+    fig.add_hline(y=30, line_dash="dash", line_color="green", row=2, col=1)
+
+    fig.update_layout(
+        height=650,
+        template="plotly_dark",
+        xaxis_rangeslider_visible=False,
+        margin=dict(l=20, r=20, t=40, b=20)
+    )
+    st.plotly_chart(fig, use_container_width=True)
+else:
+    st.error("البيانات التاريخية لهذا السهم غير كافية لحساب المؤشرات حالياً.")
