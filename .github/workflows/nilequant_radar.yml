@@ -1,0 +1,42 @@
+name: NILEQUANT Cloud Signal Radar
+
+on:
+  schedule:
+    # Runs every 30 minutes from 08:00 to 12:30 UTC (10:00 AM to 2:30 PM Cairo Time), Sunday through Thursday
+    - cron: '*/30 8-12 * * 0-4'
+  workflow_dispatch: # Allows manual trigger for testing
+
+permissions:
+  contents: write
+
+jobs:
+  quantitative_scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Configure Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Dependencies
+        run: pip install yfinance pandas numpy
+
+      - name: Execute NILEQUANT Scanner
+        env:
+          SENDER_EMAIL: ${{ secrets.SENDER_EMAIL }}
+          APP_PASSWORD: ${{ secrets.APP_PASSWORD }}
+          RECEIVER_EMAIL: ${{ secrets.RECEIVER_EMAIL }}
+        run: python background_scanner.py
+
+      - name: Update Daily Alert Log (Anti-Spam State)
+        run: |
+          if [ -f sent_alerts.json ]; then
+            git config user.name "nilequant-bot"
+            git config user.email "bot@nilequant.local"
+            git add sent_alerts.json
+            git diff --staged --quiet || git commit -m "Update daily signal dispatch log"
+            git push
+          fi
