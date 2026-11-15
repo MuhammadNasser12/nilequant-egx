@@ -19,6 +19,26 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+# Helper function to read secrets silently from Environment (GitHub) or Streamlit Secrets
+def get_cloud_secret(key, default=""):
+    val = os.environ.get(key)
+    if val:
+        return val
+    try:
+        if key in st.secrets:
+            return st.secrets[key]
+    except Exception:
+        pass
+    return default
+
+SENDER_EMAIL = get_cloud_secret("SENDER_EMAIL")
+APP_PASSWORD = get_cloud_secret("APP_PASSWORD")
+RECEIVER_EMAIL = get_cloud_secret("RECEIVER_EMAIL", SENDER_EMAIL)
+
+# Permanently locked to ACCUMULATE & STRONG BUY (score >= 1) and Auto-Dispatch ON
+MIN_SCORE_FOR_EMAIL = 1
+AUTO_EMAIL_ENABLED = True
+
 # 2. Institutional Custom CSS & Visual Identity
 st.markdown("""
     <style>
@@ -226,12 +246,14 @@ if "notified_stocks" not in st.session_state:
     st.session_state["notified_stocks"] = set()
 
 # 4. Institutional Email Alert Dispatch
-def send_buy_alert_email(sender_email, app_password, receiver_email, buy_opportunities):
+def send_buy_alert_email(buy_opportunities):
+    if not SENDER_EMAIL or not APP_PASSWORD or not RECEIVER_EMAIL:
+        return False, "Cloud SMTP Secrets not detected in environment."
     try:
         msg = MIMEMultipart("alternative")
         msg["Subject"] = "NILEQUANT SIGNAL ALERT: Actionable Buy Signal on EGX"
-        msg["From"] = sender_email
-        msg["To"] = receiver_email
+        msg["From"] = SENDER_EMAIL
+        msg["To"] = RECEIVER_EMAIL
 
         rows_html = ""
         for item in buy_opportunities:
@@ -252,7 +274,7 @@ def send_buy_alert_email(sender_email, app_password, receiver_email, buy_opportu
                 <h2 style="margin: 0 0 6px 0; color: #111827; font-size: 18px; letter-spacing: 0.5px;">NILEQUANT | EGX QUANTITATIVE ADVISORY</h2>
                 <p style="margin: 0 0 20px 0; font-size: 12px; color: #6B7280; text-transform: uppercase; letter-spacing: 1px;">Automated Technical Signal Notification</p>
                 <p style="font-size: 14px; color: #374151; line-height: 1.5;">
-                    Quantitative screening has identified an actionable <strong>BUY</strong> signal on the following watchlist equities:
+                    Quantitative screening has identified an actionable <strong>ACCUMULATE / STRONG BUY</strong> signal on the following watchlist equities:
                 </p>
                 <table style="width: 100%; border-collapse: collapse; margin-top: 16px;">
                     <thead>
@@ -276,16 +298,15 @@ def send_buy_alert_email(sender_email, app_password, receiver_email, buy_opportu
         msg.attach(MIMEText(html_content, "html", "utf-8"))
 
         with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-            server.login(sender_email, app_password)
-            server.sendmail(sender_email, receiver_email, msg.as_string())
-        return True, "Alert notification dispatched to recipient email."
+            server.login(SENDER_EMAIL, APP_PASSWORD)
+            server.sendmail(SENDER_EMAIL, RECEIVER_EMAIL, msg.as_string())
+        return True, "Alert notification dispatched automatically."
     except Exception as e:
         return False, f"SMTP Dispatch Error: {e}"
 
 # 5. Live Intraday Feed Engine (TradingView Egypt Scanner + Yahoo 5m Intraday)
 @st.cache_data(ttl=45)
 def fetch_live_tv_quotes():
-    """Fetches real-time / intraday quotes for all EGX tickers directly from TradingView Egypt Scanner."""
     tv_tickers = [f"EGX:{t.replace('.CA', '')}" for t in ALL_STOCKS.keys()]
     payload = {
         "symbols": {"tickers": tv_tickers, "query": {"types": []}},
@@ -325,7 +346,6 @@ def fetch_stock_data(ticker, period="6mo"):
             df.columns = df.columns.get_level_values(0)
         df = df.dropna().copy()
 
-        # Overlay 1: Inject live intraday quote from TradingView Egypt Scanner
         tv_quotes = fetch_live_tv_quotes()
         if ticker in tv_quotes:
             q = tv_quotes[ticker]
@@ -333,7 +353,6 @@ def fetch_stock_data(ticker, period="6mo"):
             df.iloc[-1, df.columns.get_loc("High")] = max(float(df["High"].iloc[-1]), q["high"])
             df.iloc[-1, df.columns.get_loc("Low")] = min(float(df["Low"].iloc[-1]), q["low"])
         else:
-            # Overlay 2 (Fallback): Inject latest 5-minute intraday candle from Yahoo Finance
             intraday = yf.download(ticker, period="5d", interval="5m", progress=False)
             if not intraday.empty:
                 if isinstance(intraday.columns, pd.MultiIndex):
@@ -466,13 +485,12 @@ def style_dataframe(df):
     )
 
 def is_egx_market_open(now_cairo):
-    # EGX Trading Hours: Sunday (6) and Monday-Thursday (0-3), 10:00 to 14:30 Cairo Time
     is_trading_day = now_cairo.weekday() in (6, 0, 1, 2, 3)
     market_open = now_cairo.replace(hour=10, minute=0, second=0, microsecond=0)
     market_close = now_cairo.replace(hour=14, minute=30, second=0, microsecond=0)
     return is_trading_day and (market_open <= now_cairo <= market_close)
 
-# 7. Sidebar Navigation & Controls
+# 7. Sidebar Navigation & Controls (Clean — No Email Inputs)
 st.sidebar.markdown("### DATA SYNCHRONIZATION")
 if st.sidebar.button("Force Refresh Market Data", use_container_width=True):
     st.cache_data.clear()
@@ -493,20 +511,6 @@ selected_favorites = st.sidebar.multiselect(
 
 if selected_favorites != current_watchlist:
     save_watchlist(selected_favorites)
-
-st.sidebar.divider()
-st.sidebar.markdown("### NOTIFICATION DISPATCH")
-sender_email = st.sidebar.text_input("SMTP Sender (Gmail)", placeholder="analyst@gmail.com")
-app_password = st.sidebar.text_input("App Password", type="password", placeholder="16-char token")
-receiver_email = st.sidebar.text_input("Recipient Address", value=sender_email, placeholder="client@domain.com")
-
-alert_level = st.sidebar.radio(
-    "Dispatch Trigger Threshold",
-    options=["STRONG BUY Only", "ACCUMULATE & STRONG BUY"],
-    index=0
-)
-min_score_for_email = 3 if alert_level == "STRONG BUY Only" else 1
-auto_email = st.sidebar.checkbox("Enable Automated SMTP Dispatch", value=True)
 
 st.sidebar.divider()
 st.sidebar.markdown("### SECTOR & CHART PARAMETERS")
@@ -576,7 +580,8 @@ def render_live_terminal():
                     }
                     fav_summary.append(item_data)
 
-                    if score >= min_score_for_email:
+                    # Trigger on ACCUMULATE & STRONG BUY (score >= 1)
+                    if score >= MIN_SCORE_FOR_EMAIL:
                         urgent_buy_list.append(item_data)
 
         if fav_summary:
@@ -584,28 +589,19 @@ def render_live_terminal():
             st.dataframe(style_dataframe(fav_df), use_container_width=True, hide_index=True)
 
             if urgent_buy_list:
-                buy_names = ", ".join([f"{x['Ticker']} ({x['Company Name']})" for x in urgent_buy_list])
+                buy_names = ", ".join([f"{x['Ticker']} ({x['Signal']})" for x in urgent_buy_list])
                 st.markdown(
                     f'<div class="institutional-alert"><strong>ACTIONABLE SIGNAL DETECTED:</strong> '
-                    f'Quantitative criteria met for immediate accumulation on: {buy_names}</div>',
+                    f'Quantitative criteria met for accumulation on: {buy_names}</div>',
                     unsafe_allow_html=True
                 )
 
                 new_alerts = [x for x in urgent_buy_list if x['Ticker'] not in st.session_state["notified_stocks"]]
-                manual_send = st.button("Dispatch Signal Report via Email")
-
-                if (auto_email and new_alerts and sender_email and app_password) or manual_send:
-                    if not sender_email or not app_password or not receiver_email:
-                        st.warning("SMTP credentials incomplete. Configure Sender Email and App Password in the sidebar.")
-                    else:
-                        target_list = urgent_buy_list if manual_send else new_alerts
-                        success, msg_status = send_buy_alert_email(sender_email, app_password, receiver_email, target_list)
-                        if success:
-                            st.info(msg_status)
-                            for x in target_list:
-                                st.session_state["notified_stocks"].add(x['Ticker'])
-                        else:
-                            st.error(msg_status)
+                if AUTO_EMAIL_ENABLED and new_alerts and SENDER_EMAIL and APP_PASSWORD:
+                    success, _ = send_buy_alert_email(new_alerts)
+                    if success:
+                        for x in new_alerts:
+                            st.session_state["notified_stocks"].add(x['Ticker'])
     else:
         st.info("No equities currently assigned to Watchlist. Select tickers from the left configuration panel.")
 
