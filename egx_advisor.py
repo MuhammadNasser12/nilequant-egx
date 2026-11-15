@@ -7,10 +7,11 @@ from plotly.subplots import make_subplots
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+from datetime import datetime, timezone, timedelta
 import json
 import os
 
-# 1. Page Configuration (No Emojis, Clean Institutional Title)
+# 1. Page Configuration (Clean Institutional Title)
 st.set_page_config(
     page_title="NILEQUANT | EGX Quantitative Terminal",
     layout="wide",
@@ -22,19 +23,16 @@ st.markdown("""
     <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;600&display=swap');
 
-    /* Global Typography & Background */
     html, body, [class*="css"] {
         font-family: 'Inter', sans-serif;
         background-color: #0B0F19;
         color: #E5E7EB;
     }
 
-    /* Hide Default Streamlit Chrome */
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
     header {background: transparent !important;}
 
-    /* Terminal Top Header Bar */
     .terminal-header {
         background: linear-gradient(90deg, #111827 0%, #1E293B 100%);
         border: 1px solid #1F2937;
@@ -45,6 +43,8 @@ st.markdown("""
         display: flex;
         justify-content: space-between;
         align-items: center;
+        flex-wrap: wrap;
+        gap: 12px;
     }
     .brand-title {
         font-size: 1.5rem;
@@ -74,7 +74,6 @@ st.markdown("""
         letter-spacing: 0.5px;
     }
 
-    /* Section Headers */
     .section-header {
         font-size: 0.95rem;
         font-weight: 600;
@@ -87,7 +86,6 @@ st.markdown("""
         margin-bottom: 16px;
     }
 
-    /* Metric Cards Styling */
     div[data-testid="stMetric"] {
         background-color: #111827;
         border: 1px solid #1F2937;
@@ -108,7 +106,6 @@ st.markdown("""
         color: #F9FAFB !important;
     }
 
-    /* Signal Breakdown Cards */
     .signal-item {
         background-color: #111827;
         border: 1px solid #1F2937;
@@ -146,7 +143,6 @@ st.markdown("""
         text-align: center;
     }
 
-    /* Alert Banner */
     .institutional-alert {
         background-color: rgba(16, 185, 129, 0.08);
         border: 1px solid rgba(16, 185, 129, 0.4);
@@ -159,7 +155,6 @@ st.markdown("""
         font-size: 0.9rem;
     }
 
-    /* Sidebar Polish */
     section[data-testid="stSidebar"] {
         background-color: #0D131F;
         border-right: 1px solid #1F2937;
@@ -289,8 +284,8 @@ def send_buy_alert_email(sender_email, app_password, receiver_email, buy_opportu
     except Exception as e:
         return False, f"SMTP Dispatch Error: {e}"
 
-# 5. Market Data & Quantitative Indicators
-@st.cache_data(ttl=600)
+# 5. Market Data & Quantitative Indicators (TTL set to 120 seconds / 2 minutes)
+@st.cache_data(ttl=120)
 def fetch_stock_data(ticker, period="6mo"):
     try:
         df = yf.download(ticker, period=period, interval="1d", progress=False)
@@ -337,7 +332,6 @@ def generate_recommendation(df):
     score = 0
     reasons = []
     
-    # 1. RSI Factor
     if latest['RSI'] < 30:
         score += 2
         reasons.append(("BULLISH", f"RSI-14 is in deep oversold territory ({latest['RSI']:.1f}), indicating high probability of mean reversion."))
@@ -348,7 +342,6 @@ def generate_recommendation(df):
         score -= 2
         reasons.append(("BEARISH", f"RSI-14 has reached overbought territory ({latest['RSI']:.1f}), elevating short-term pullback risk."))
 
-    # 2. Moving Average Trend Factor
     if latest['Close'] > latest['SMA20'] and latest['SMA20'] > latest['SMA50']:
         score += 2
         reasons.append(("BULLISH", "Price is trading above both SMA-20 and SMA-50, confirming positive trend alignment."))
@@ -359,7 +352,6 @@ def generate_recommendation(df):
         score -= 2
         reasons.append(("BEARISH", "Price is trading below both SMA-20 and SMA-50, confirming downward trend pressure."))
 
-    # 3. MACD Momentum Factor
     if latest['MACD'] > latest['Signal_Line'] and prev['MACD'] <= prev['Signal_Line']:
         score += 2
         reasons.append(("BULLISH", "MACD line crossed above the Signal line (fresh positive momentum trigger)."))
@@ -390,7 +382,6 @@ def generate_recommendation(df):
 
     return decision, score, reasons, stop_loss, take_profit
 
-# Table Styling Function (Institutional Color Coding without Emojis)
 def style_dataframe(df):
     def color_signal(val):
         if val == "STRONG BUY":
@@ -426,18 +417,16 @@ def style_dataframe(df):
         })
     )
 
-# 7. Top Brand Header
-st.markdown("""
-    <div class="terminal-header">
-        <div>
-            <p class="brand-title">NILE<span class="brand-accent">QUANT</span></p>
-            <p class="brand-subtitle">Egyptian Exchange (EGX) Quantitative Signal & Advisory Terminal</p>
-        </div>
-        <div class="terminal-badge">MARKET FEED: EGX (.CA) | MODEL: MULTI-FACTOR v2.4</div>
-    </div>
-""", unsafe_allow_html=True)
+# 7. Sidebar Navigation & Controls
+st.sidebar.markdown("### DATA SYNCHRONIZATION")
+if st.sidebar.button("Force Refresh Market Data", use_container_width=True):
+    st.cache_data.clear()
+    st.rerun()
 
-# 8. Sidebar Navigation & Controls
+auto_refresh = st.sidebar.checkbox("Auto-Refresh Feed (Every 2 Min)", value=True)
+refresh_interval = 120 if auto_refresh else None
+
+st.sidebar.divider()
 st.sidebar.markdown("### WATCHLIST CONFIGURATION")
 current_watchlist = load_watchlist()
 selected_favorites = st.sidebar.multiselect(
@@ -478,16 +467,93 @@ period_map = {"3 Months": "3mo", "6 Months": "6mo", "1 Year": "1y", "2 Years": "
 selected_period_label = st.sidebar.select_slider("Historical Horizon", options=list(period_map.keys()), value="6 Months")
 selected_period = period_map[selected_period_label]
 
-# --- Section 1: Watchlist Monitor ---
-st.markdown('<div class="section-header">01 / Watchlist Signal Monitor</div>', unsafe_allow_html=True)
+# 8. Main Auto-Refreshing Terminal Body (Updates every 120 seconds)
+@st.fragment(run_every=refresh_interval)
+def render_live_terminal():
+    cairo_tz = timezone(timedelta(hours=2))
+    sync_time = datetime.now(cairo_tz).strftime("%H:%M:%S EET")
+    sync_mode = "AUTO (2M)" if auto_refresh else "MANUAL"
 
-if selected_favorites:
-    fav_summary = []
-    urgent_buy_list = []
+    st.markdown(f"""
+        <div class="terminal-header">
+            <div>
+                <p class="brand-title">NILE<span class="brand-accent">QUANT</span></p>
+                <p class="brand-subtitle">Egyptian Exchange (EGX) Quantitative Signal & Advisory Terminal</p>
+            </div>
+            <div class="terminal-badge">FEED: EGX (.CA) | SYNC: {sync_mode} | LAST UPDATE: {sync_time}</div>
+        </div>
+    """, unsafe_allow_html=True)
 
-    with st.spinner("Executing quantitative scan on watchlist..."):
-        for ticker in selected_favorites:
-            name = ALL_STOCKS[ticker]
+    # --- Section 1: Watchlist Monitor ---
+    st.markdown('<div class="section-header">01 / Watchlist Signal Monitor</div>', unsafe_allow_html=True)
+
+    if selected_favorites:
+        fav_summary = []
+        urgent_buy_list = []
+
+        with st.spinner("Executing quantitative scan on watchlist..."):
+            for ticker in selected_favorites:
+                name = ALL_STOCKS[ticker]
+                raw_df = fetch_stock_data(ticker, period="6mo")
+                if raw_df is not None and len(raw_df) >= 50:
+                    ind_df = calculate_indicators(raw_df)
+                    decision, score, _, sl, tp = generate_recommendation(ind_df)
+                    last_close = float(ind_df['Close'].iloc[-1])
+                    prev_close = float(ind_df['Close'].iloc[-2])
+                    change_pct = ((last_close - prev_close) / prev_close) * 100
+
+                    item_data = {
+                        "Ticker": ticker.replace(".CA", ""),
+                        "Company Name": name,
+                        "Price (EGP)": round(last_close, 2),
+                        "Daily Change %": round(change_pct, 2),
+                        "RSI (14)": round(float(ind_df['RSI'].iloc[-1]), 1),
+                        "Signal": decision,
+                        "Stop Loss": round(float(sl), 2),
+                        "Target Price": round(float(tp), 2),
+                        "score": score
+                    }
+                    fav_summary.append(item_data)
+
+                    if score >= min_score_for_email:
+                        urgent_buy_list.append(item_data)
+
+        if fav_summary:
+            fav_df = pd.DataFrame(fav_summary).drop(columns=["score"])
+            st.dataframe(style_dataframe(fav_df), use_container_width=True, hide_index=True)
+
+            if urgent_buy_list:
+                buy_names = ", ".join([f"{x['Ticker']} ({x['Company Name']})" for x in urgent_buy_list])
+                st.markdown(
+                    f'<div class="institutional-alert"><strong>ACTIONABLE SIGNAL DETECTED:</strong> '
+                    f'Quantitative criteria met for immediate accumulation on: {buy_names}</div>',
+                    unsafe_allow_html=True
+                )
+
+                new_alerts = [x for x in urgent_buy_list if x['Ticker'] not in st.session_state["notified_stocks"]]
+                manual_send = st.button("Dispatch Signal Report via Email")
+
+                if (auto_email and new_alerts and sender_email and app_password) or manual_send:
+                    if not sender_email or not app_password or not receiver_email:
+                        st.warning("SMTP credentials incomplete. Configure Sender Email and App Password in the sidebar.")
+                    else:
+                        target_list = urgent_buy_list if manual_send else new_alerts
+                        success, msg_status = send_buy_alert_email(sender_email, app_password, receiver_email, target_list)
+                        if success:
+                            st.info(msg_status)
+                            for x in target_list:
+                                st.session_state["notified_stocks"].add(x['Ticker'])
+                        else:
+                            st.error(msg_status)
+    else:
+        st.info("No equities currently assigned to Watchlist. Select tickers from the left configuration panel.")
+
+    # --- Section 2: Sector Screener ---
+    st.markdown(f'<div class="section-header">02 / Sector Quantitative Screener — {selected_sector}</div>', unsafe_allow_html=True)
+
+    sector_summary = []
+    with st.spinner("Computing sector metrics..."):
+        for ticker, name in sector_stocks.items():
             raw_df = fetch_stock_data(ticker, period="6mo")
             if raw_df is not None and len(raw_df) >= 50:
                 ind_df = calculate_indicators(raw_df)
@@ -495,157 +561,98 @@ if selected_favorites:
                 last_close = float(ind_df['Close'].iloc[-1])
                 prev_close = float(ind_df['Close'].iloc[-2])
                 change_pct = ((last_close - prev_close) / prev_close) * 100
-
-                item_data = {
+                
+                sector_summary.append({
                     "Ticker": ticker.replace(".CA", ""),
                     "Company Name": name,
                     "Price (EGP)": round(last_close, 2),
                     "Daily Change %": round(change_pct, 2),
                     "RSI (14)": round(float(ind_df['RSI'].iloc[-1]), 1),
                     "Signal": decision,
-                    "Stop Loss": round( float(sl), 2),
-                    "Target Price": round(float(tp), 2),
-                    "score": score
-                }
-                fav_summary.append(item_data)
+                    "Stop Loss": round(float(sl), 2),
+                    "Target Price": round(float(tp), 2)
+                })
 
-                if score >= min_score_for_email:
-                    urgent_buy_list.append(item_data)
+    if sector_summary:
+        summary_df = pd.DataFrame(sector_summary)
+        st.dataframe(style_dataframe(summary_df), use_container_width=True, hide_index=True)
 
-    if fav_summary:
-        fav_df = pd.DataFrame(fav_summary).drop(columns=["score"])
-        st.dataframe(style_dataframe(fav_df), use_container_width=True, hide_index=True)
+    # --- Section 3: Single-Equity Deep Dive ---
+    stock_name = sector_stocks[selected_ticker]
+    clean_ticker = selected_ticker.replace('.CA', '')
+    st.markdown(f'<div class="section-header">03 / Technical Deep-Dive — {clean_ticker} ({stock_name})</div>', unsafe_allow_html=True)
 
-        if urgent_buy_list:
-            buy_names = ", ".join([f"{x['Ticker']} ({x['Company Name']})" for x in urgent_buy_list])
+    df_raw = fetch_stock_data(selected_ticker, period=selected_period)
+
+    if df_raw is not None and len(df_raw) >= 50:
+        df_ind = calculate_indicators(df_raw)
+        decision, score, reasons, stop_loss, take_profit = generate_recommendation(df_ind)
+        
+        latest = df_ind.iloc[-1]
+        prev = df_ind.iloc[-2]
+        price_change = float(latest['Close'] - prev['Close'])
+        pct_change = (price_change / float(prev['Close'])) * 100
+
+        col1, col2, col3, col4, col5 = st.columns(5)
+        col1.metric("Last Close (EGP)", f"{latest['Close']:.2f}", f"{pct_change:+.2f}%")
+        col2.metric("Model Signal", decision)
+        col3.metric("RSI (14-Day)", f"{latest['RSI']:.1f}")
+        col4.metric("ATR Stop Loss", f"{stop_loss:.2f} EGP")
+        col5.metric("ATR Target Price", f"{take_profit:.2f} EGP")
+
+        st.markdown("#### Factor Attribution Breakdown")
+        for tag, text in reasons:
+            tag_class = "tag-bullish" if tag == "BULLISH" else "tag-bearish"
             st.markdown(
-                f'<div class="institutional-alert"><strong>ACTIONABLE SIGNAL DETECTED:</strong> '
-                f'Quantitative criteria met for immediate accumulation on: {buy_names}</div>',
+                f'<div class="signal-item"><span class="{tag_class}">{tag}</span><span>{text}</span></div>',
                 unsafe_allow_html=True
             )
 
-            new_alerts = [x for x in urgent_buy_list if x['Ticker'] not in st.session_state["notified_stocks"]]
-            manual_send = st.button("Dispatch Signal Report via Email")
-
-            if (auto_email and new_alerts and sender_email and app_password) or manual_send:
-                if not sender_email or not app_password or not receiver_email:
-                    st.warning("SMTP credentials incomplete. Configure Sender Email and App Password in the sidebar.")
-                else:
-                    target_list = urgent_buy_list if manual_send else new_alerts
-                    success, msg_status = send_buy_alert_email(sender_email, app_password, receiver_email, target_list)
-                    if success:
-                        st.info(msg_status)
-                        for x in target_list:
-                            st.session_state["notified_stocks"].add(x['Ticker'])
-                    else:
-                        st.error(msg_status)
-else:
-    st.info("No equities currently assigned to Watchlist. Select tickers from the left configuration panel.")
-
-# --- Section 2: Sector Screener ---
-st.markdown(f'<div class="section-header">02 / Sector Quantitative Screener — {selected_sector}</div>', unsafe_allow_html=True)
-
-sector_summary = []
-with st.spinner("Computing sector metrics..."):
-    for ticker, name in sector_stocks.items():
-        raw_df = fetch_stock_data(ticker, period="6mo")
-        if raw_df is not None and len(raw_df) >= 50:
-            ind_df = calculate_indicators(raw_df)
-            decision, score, _, sl, tp = generate_recommendation(ind_df)
-            last_close = float(ind_df['Close'].iloc[-1])
-            prev_close = float(ind_df['Close'].iloc[-2])
-            change_pct = ((last_close - prev_close) / prev_close) * 100
-            
-            sector_summary.append({
-                "Ticker": ticker.replace(".CA", ""),
-                "Company Name": name,
-                "Price (EGP)": round(last_close, 2),
-                "Daily Change %": round(change_pct, 2),
-                "RSI (14)": round(float(ind_df['RSI'].iloc[-1]), 1),
-                "Signal": decision,
-                "Stop Loss": round(float(sl), 2),
-                "Target Price": round(float(tp), 2)
-            })
-
-if sector_summary:
-    summary_df = pd.DataFrame(sector_summary)
-    st.dataframe(style_dataframe(summary_df), use_container_width=True, hide_index=True)
-
-# --- Section 3: Single-Equity Deep Dive ---
-stock_name = sector_stocks[selected_ticker]
-clean_ticker = selected_ticker.replace('.CA', '')
-st.markdown(f'<div class="section-header">03 / Technical Deep-Dive — {clean_ticker} ({stock_name})</div>', unsafe_allow_html=True)
-
-df_raw = fetch_stock_data(selected_ticker, period=selected_period)
-
-if df_raw is not None and len(df_raw) >= 50:
-    df_ind = calculate_indicators(df_raw)
-    decision, score, reasons, stop_loss, take_profit = generate_recommendation(df_ind)
-    
-    latest = df_ind.iloc[-1]
-    prev = df_ind.iloc[-2]
-    price_change = float(latest['Close'] - prev['Close'])
-    pct_change = (price_change / float(prev['Close'])) * 100
-
-    col1, col2, col3, col4, col5 = st.columns(5)
-    col1.metric("Last Close (EGP)", f"{latest['Close']:.2f}", f"{pct_change:+.2f}%")
-    col2.metric("Model Signal", decision)
-    col3.metric("RSI (14-Day)", f"{latest['RSI']:.1f}")
-    col4.metric("ATR Stop Loss", f"{stop_loss:.2f} EGP")
-    col5.metric("ATR Target Price", f"{take_profit:.2f} EGP")
-
-    st.markdown("#### Factor Attribution Breakdown")
-    for tag, text in reasons:
-        tag_class = "tag-bullish" if tag == "BULLISH" else "tag-bearish"
-        st.markdown(
-            f'<div class="signal-item"><span class="{tag_class}">{tag}</span><span>{text}</span></div>',
-            unsafe_allow_html=True
+        fig = make_subplots(
+            rows=2, cols=1, shared_xaxes=True,
+            vertical_spacing=0.06,
+            subplot_titles=(f"{clean_ticker} — Price Action & Moving Averages", "Relative Strength Index (14)"),
+            row_heights=[0.72, 0.28]
         )
 
-    # Institutional Plotly Chart
-    fig = make_subplots(
-        rows=2, cols=1, shared_xaxes=True,
-        vertical_spacing=0.06,
-        subplot_titles=(f"{clean_ticker} — Price Action & Moving Averages", "Relative Strength Index (14)"),
-        row_heights=[0.72, 0.28]
-    )
+        fig.add_trace(go.Candlestick(
+            x=df_ind.index, open=df_ind['Open'], high=df_ind['High'],
+            low=df_ind['Low'], close=df_ind['Close'], name="OHLC",
+            increasing_line_color='#10B981', decreasing_line_color='#EF4444'
+        ), row=1, col=1)
 
-    fig.add_trace(go.Candlestick(
-        x=df_ind.index, open=df_ind['Open'], high=df_ind['High'],
-        low=df_ind['Low'], close=df_ind['Close'], name="OHLC",
-        increasing_line_color='#10B981', decreasing_line_color='#EF4444'
-    ), row=1, col=1)
+        fig.add_trace(go.Scatter(
+            x=df_ind.index, y=df_ind['SMA20'],
+            line=dict(color='#3B82F6', width=1.5), name='SMA 20'
+        ), row=1, col=1)
 
-    fig.add_trace(go.Scatter(
-        x=df_ind.index, y=df_ind['SMA20'],
-        line=dict(color='#3B82F6', width=1.5), name='SMA 20'
-    ), row=1, col=1)
+        fig.add_trace(go.Scatter(
+            x=df_ind.index, y=df_ind['SMA50'],
+            line=dict(color='#F59E0B', width=1.5), name='SMA 50'
+        ), row=1, col=1)
 
-    fig.add_trace(go.Scatter(
-        x=df_ind.index, y=df_ind['SMA50'],
-        line=dict(color='#F59E0B', width=1.5), name='SMA 50'
-    ), row=1, col=1)
+        fig.add_trace(go.Scatter(
+            x=df_ind.index, y=df_ind['RSI'],
+            line=dict(color='#60A5FA', width=1.8), name='RSI (14)'
+        ), row=2, col=1)
 
-    fig.add_trace(go.Scatter(
-        x=df_ind.index, y=df_ind['RSI'],
-        line=dict(color='#60A5FA', width=1.8), name='RSI (14)'
-    ), row=2, col=1)
+        fig.add_hline(y=70, line_dash="dot", line_color="#EF4444", row=2, col=1)
+        fig.add_hline(y=30, line_dash="dot", line_color="#10B981", row=2, col=1)
 
-    fig.add_hline(y=70, line_dash="dot", line_color="#EF4444", row=2, col=1)
-    fig.add_hline(y=30, line_dash="dot", line_color="#10B981", row=2, col=1)
+        fig.update_layout(
+            height=640,
+            paper_bgcolor="#111827",
+            plot_bgcolor="#111827",
+            font=dict(family="Inter, sans-serif", color="#9CA3AF", size=12),
+            xaxis_rangeslider_visible=False,
+            margin=dict(l=20, r=20, t=45, b=20),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+        )
+        fig.update_xaxes(gridcolor="#1F2937", zeroline=False)
+        fig.update_yaxes(gridcolor="#1F2937", zeroline=False)
 
-    fig.update_layout(
-        height=640,
-        paper_bgcolor="#111827",
-        plot_bgcolor="#111827",
-        font=dict(family="Inter, sans-serif", color="#9CA3AF", size=12),
-        xaxis_rangeslider_visible=False,
-        margin=dict(l=20, r=20, t=45, b=20),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
-    )
-    fig.update_xaxes(gridcolor="#1F2937", zeroline=False)
-    fig.update_yaxes(gridcolor="#1F2937", zeroline=False)
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.error("Historical market data insufficient to compute quantitative factors for this equity.")
 
-    st.plotly_chart(fig, use_container_width=True)
-else:
-    st.error("Historical market data insufficient to compute quantitative factors for this equity.")
+render_live_terminal()
